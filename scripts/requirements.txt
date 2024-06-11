@@ -1,6 +1,6 @@
 transformers[torch]==4.38.2
 onnxruntime==1.17.1
-optimum==1.17.1
+optimum @ git+https://github.com/andmev/optimum.git
 onnx==1.15.0
 onnxconverter-common==1.14.0
 tqdm

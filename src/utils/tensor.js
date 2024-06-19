@@ -850,6 +850,43 @@ export async function matmul(a, b) {
     return await op({ a, b });
 }
 
+/**
+ * Computes the one dimensional Fourier transform of real-valued input.
+ * Inspired by https://pytorch.org/docs/stable/generated/torch.fft.rfft.html
+ * @param {Tensor} x the real input tensor
+ * @param {Tensor} a The dimension along which to take the one dimensional real FFT.
+ * @returns {Promise<Tensor>} the output tensor.
+ */
+export async function rfft(x, a) {
+    const op = await TensorOpRegistry.rfft;
+    return await op({ x, a });
+}
+
+
+/**
+ * Returns the k largest elements of the given input tensor.
+ * Inspired by https://pytorch.org/docs/stable/generated/torch.topk.html
+ * @param {Tensor} x the input tensor
+ * @param {number} k the k in "top-k"
+ * @returns {Promise<[Tensor, Tensor]>} the output tuple of (Tensor, LongTensor) of top-k elements and their indices.
+ */
+export async function topk(x, k) {
+    const op = await TensorOpRegistry.top_k;
+
+    if (k === null) {
+        k = x.dims.at(-1);
+    } else {
+        k = Math.min(k, x.dims.at(-1));
+    }
+    return await op({
+        x,
+        k: new Tensor(
+            'int64',
+            [BigInt(k)],
+            [1]
+        )
+    });
+}
 
 /**
  * Perform mean pooling of the last hidden state followed by a normalization step.

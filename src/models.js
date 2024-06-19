@@ -1437,7 +1437,7 @@ export class PreTrainedModel extends Callable {
             for (let batch_idx = 0; batch_idx < next_tokens_scores.dims.at(0); ++batch_idx) {
                 const logs = next_tokens_scores[batch_idx];
 
-                const sampledTokens = sampler(logs);
+                const sampledTokens = await sampler(logs);
                 for (const [newTokenId, logProb] of sampledTokens) {
                     const bigint = BigInt(newTokenId);
                     // TODO: If branching, use previous beam as a starting point
@@ -1445,6 +1445,9 @@ export class PreTrainedModel extends Callable {
                     scores[batch_idx] += logProb;
                     all_input_ids[batch_idx].push(bigint);
                     generated_input_ids.push([bigint]);
+
+                    // TODO: Support beam search
+                    break;
                 }
             }
             if (streamer) {
@@ -3880,6 +3883,29 @@ export class LlamaForCausalLM extends LlamaPreTrainedModel { }
 //////////////////////////////////////////////////
 
 //////////////////////////////////////////////////
+// Cohere models
+
+/**
+ * The bare Cohere Model outputting raw hidden-states without any specific head on top.
+ */
+export class CoherePreTrainedModel extends PreTrainedModel {
+    /**
+     * Creates a new instance of the `CoherePreTrainedModel` class.
+     * @param {Object} config The model configuration.
+     * @param {Record<string, any>} sessions The inference sessions for the model.
+     * @param {GenerationConfig} generation_config The generation configuration.
+     */
+    constructor(config, sessions, generation_config) {
+        super(config, sessions);
+        this.generation_config = generation_config;
+    }
+}
+export class CohereModel extends CoherePreTrainedModel { }
+
+export class CohereForCausalLM extends CoherePreTrainedModel { }
+//////////////////////////////////////////////////
+
+//////////////////////////////////////////////////
 // Gemma models
 
 /**
@@ -5893,6 +5919,99 @@ export class MusicgenForConditionalGeneration extends PreTrainedModel { // NOTE:
 }
 
 //////////////////////////////////////////////////
+// MobileNetV1 models
+export class MobileNetV1PreTrainedModel extends PreTrainedModel { }
+
+/**
+ * The bare MobileNetV1 model outputting raw hidden-states without any specific head on top.
+ */
+export class MobileNetV1Model extends MobileNetV1PreTrainedModel { }
+
+/**
+ * MobileNetV1 model with an image classification head on top (a linear layer on top of the pooled features),
+ * e.g. for ImageNet.
+ */
+export class MobileNetV1ForImageClassification extends MobileNetV1PreTrainedModel {
+    /**
+     * @param {any} model_inputs
+     */
+    async _call(model_inputs) {
+        return new SequenceClassifierOutput(await super._call(model_inputs));
+    }
+}
+//////////////////////////////////////////////////
+
+//////////////////////////////////////////////////
+// MobileNetV2 models
+export class MobileNetV2PreTrainedModel extends PreTrainedModel { }
+
+/**
+ * The bare MobileNetV2 model outputting raw hidden-states without any specific head on top.
+ */
+export class MobileNetV2Model extends MobileNetV2PreTrainedModel { }
+
+/**
+ * MobileNetV2 model with an image classification head on top (a linear layer on top of the pooled features),
+ * e.g. for ImageNet.
+ */
+export class MobileNetV2ForImageClassification extends MobileNetV2PreTrainedModel {
+    /**
+     * @param {any} model_inputs
+     */
+    async _call(model_inputs) {
+        return new SequenceClassifierOutput(await super._call(model_inputs));
+    }
+}
+//////////////////////////////////////////////////
+
+//////////////////////////////////////////////////
+// MobileNetV3 models
+export class MobileNetV3PreTrainedModel extends PreTrainedModel { }
+
+/**
+ * The bare MobileNetV3 model outputting raw hidden-states without any specific head on top.
+ */
+export class MobileNetV3Model extends MobileNetV3PreTrainedModel { }
+
+/**
+ * MobileNetV3 model with an image classification head on top (a linear layer on top of the pooled features),
+ * e.g. for ImageNet.
+ */
+export class MobileNetV3ForImageClassification extends MobileNetV3PreTrainedModel {
+    /**
+     * @param {any} model_inputs
+     */
+    async _call(model_inputs) {
+        return new SequenceClassifierOutput(await super._call(model_inputs));
+    }
+}
+//////////////////////////////////////////////////
+
+//////////////////////////////////////////////////
+// MobileNetV4 models
+export class MobileNetV4PreTrainedModel extends PreTrainedModel { }
+
+/**
+ * The bare MobileNetV4 model outputting raw hidden-states without any specific head on top.
+ */
+export class MobileNetV4Model extends MobileNetV4PreTrainedModel { }
+
+/**
+ * MobileNetV4 model with an image classification head on top (a linear layer on top of the pooled features),
+ * e.g. for ImageNet.
+ */
+export class MobileNetV4ForImageClassification extends MobileNetV4PreTrainedModel {
+    /**
+     * @param {any} model_inputs
+     */
+    async _call(model_inputs) {
+        return new SequenceClassifierOutput(await super._call(model_inputs));
+    }
+}
+//////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////
 // AutoModels, used to simplify construction of PreTrainedModels
 // (uses config to instantiate correct class)
 
@@ -6020,6 +6139,11 @@ const MODEL_MAPPING_NAMES_ENCODER_ONLY = new Map([
 
     ['hifigan', ['SpeechT5HifiGan', SpeechT5HifiGan]],
     ['efficientnet', ['EfficientNetModel', EfficientNetModel]],
+
+    ['mobilenet_v1', ['MobileNetV1Model', MobileNetV1Model]],
+    ['mobilenet_v2', ['MobileNetV2Model', MobileNetV2Model]],
+    ['mobilenet_v3', ['MobileNetV3Model', MobileNetV3Model]],
+    ['mobilenet_v4', ['MobileNetV4Model', MobileNetV4Model]],
 ]);
 
 const MODEL_MAPPING_NAMES_ENCODER_DECODER = new Map([
@@ -6045,6 +6169,7 @@ const MODEL_MAPPING_NAMES_DECODER_ONLY = new Map([
     ['gpt_neox', ['GPTNeoXModel', GPTNeoXModel]],
     ['codegen', ['CodeGenModel', CodeGenModel]],
     ['llama', ['LlamaModel', LlamaModel]],
+    ['cohere', ['CohereModel', CohereModel]],
     ['gemma', ['GemmaModel', GemmaModel]],
     ['openelm', ['OpenELMModel', OpenELMModel]],
     ['qwen2', ['Qwen2Model', Qwen2Model]],
@@ -6130,6 +6255,7 @@ const MODEL_FOR_CAUSAL_LM_MAPPING_NAMES = new Map([
     ['gpt_neox', ['GPTNeoXForCausalLM', GPTNeoXForCausalLM]],
     ['codegen', ['CodeGenForCausalLM', CodeGenForCausalLM]],
     ['llama', ['LlamaForCausalLM', LlamaForCausalLM]],
+    ['cohere', ['CohereForCausalLM', CohereForCausalLM]],
     ['gemma', ['GemmaForCausalLM', GemmaForCausalLM]],
     ['openelm', ['OpenELMForCausalLM', OpenELMForCausalLM]],
     ['qwen2', ['Qwen2ForCausalLM', Qwen2ForCausalLM]],
@@ -6209,6 +6335,10 @@ const MODEL_FOR_IMAGE_CLASSIFICATION_MAPPING_NAMES = new Map([
     ['swin', ['SwinForImageClassification', SwinForImageClassification]],
     ['segformer', ['SegformerForImageClassification', SegformerForImageClassification]],
     ['efficientnet', ['EfficientNetForImageClassification', EfficientNetForImageClassification]],
+    ['mobilenet_v1', ['MobileNetV1ForImageClassification', MobileNetV1ForImageClassification]],
+    ['mobilenet_v2', ['MobileNetV2ForImageClassification', MobileNetV2ForImageClassification]],
+    ['mobilenet_v3', ['MobileNetV3ForImageClassification', MobileNetV3ForImageClassification]],
+    ['mobilenet_v4', ['MobileNetV4ForImageClassification', MobileNetV4ForImageClassification]],
 ]);
 
 const MODEL_FOR_OBJECT_DETECTION_MAPPING_NAMES = new Map([

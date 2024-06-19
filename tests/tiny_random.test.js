@@ -1,48 +1,67 @@
 
 
 import {
+    // Tokenizers
     CodeGenTokenizer,
-    LlamaForCausalLM,
     LlamaTokenizer,
-    GemmaForCausalLM,
+    CohereTokenizer,
     GemmaTokenizer,
-    OPTForCausalLM,
     GPT2Tokenizer,
-    GPTNeoXForCausalLM,
     GPTNeoXTokenizer,
+    BloomTokenizer,
+    BertTokenizer,
+    T5Tokenizer,
+    WhisperTokenizer,
+    PreTrainedTokenizer,
+    AutoTokenizer,
+
+    // Processors
+    CLIPImageProcessor,
+    AutoProcessor,
+    Processor,
+
+    // Models
+    LlamaForCausalLM,
+    CohereModel,
+    CohereForCausalLM,
+    GemmaForCausalLM,
+    OPTForCausalLM,
+    GPTNeoXForCausalLM,
     GPTJForCausalLM,
     BloomForCausalLM,
-    BloomTokenizer,
     GPTBigCodeForCausalLM,
     GPT2LMHeadModel,
     MptForCausalLM,
     CodeGenForCausalLM,
     MistralForCausalLM,
     GPTNeoForCausalLM,
-    BertTokenizer,
     BertForMaskedLM,
     BertForSequenceClassification,
     T5ForConditionalGeneration,
-    T5Tokenizer,
     T5Model,
     BertModel,
     BertForTokenClassification,
     BertForQuestionAnswering,
     MusicgenForConditionalGeneration,
     LlavaForConditionalGeneration,
-    CLIPImageProcessor,
-    WhisperTokenizer,
     WhisperForConditionalGeneration,
-    AutoProcessor,
-    RawImage,
-    full,
-    PreTrainedTokenizer,
-    AutoTokenizer,
-    Processor,
     VisionEncoderDecoderModel,
+
+    // Pipelines
+    pipeline,
+    FillMaskPipeline,
+    TextClassificationPipeline,
+    ImageClassificationPipeline,
+    TokenClassificationPipeline,
+    QuestionAnsweringPipeline,
+
+    // Other
+    full,
+    RawImage,
 } from '../src/transformers.js';
 
 import { init } from './init.js';
+import { compare } from './test_utils.js';
 init();
 
 const MAX_MODEL_LOAD_TIME = 10_000; // 10 seconds
@@ -723,6 +742,86 @@ describe('Tiny random models', () => {
         });
     });
 
+    describe('cohere', () => {
+        describe('CohereModel', () => {
+            const model_id = 'hf-internal-testing/tiny-random-CohereModel';
+            /** @type {CohereModel} */
+            let model;
+            /** @type {CohereTokenizer} */
+            let tokenizer;
+            beforeAll(async () => {
+                model = await CohereModel.from_pretrained(model_id, {
+                    // TODO move to config
+                    ...DEFAULT_MODEL_OPTIONS,
+                });
+                tokenizer = await CohereTokenizer.from_pretrained(model_id);
+                tokenizer.padding_side = 'left';
+            }, MAX_MODEL_LOAD_TIME);
+
+            it('batch_size=1', async () => {
+                const inputs = tokenizer('hello');
+                const { last_hidden_state } = await model(inputs);
+                expect(last_hidden_state.dims).toEqual([1, 4, 32]);
+                expect(last_hidden_state.mean().item()).toBeCloseTo(0.0, 5);
+            }, MAX_TEST_EXECUTION_TIME);
+
+            it('batch_size>1', async () => {
+                const inputs = tokenizer(['hello', 'hello world'], { padding: true });
+                const { last_hidden_state } = await model(inputs);
+                expect(last_hidden_state.dims).toEqual([2, 6, 32]);
+                expect(last_hidden_state.mean().item()).toBeCloseTo(9.934107758624577e-09, 5);
+            }, MAX_TEST_EXECUTION_TIME);
+
+            afterAll(async () => {
+                await model?.dispose();
+            }, MAX_MODEL_DISPOSE_TIME);
+        });
+
+        describe('CohereForCausalLM', () => {
+            const model_id = 'hf-internal-testing/tiny-random-CohereForCausalLM';
+            /** @type {CohereForCausalLM} */
+            let model;
+            /** @type {CohereTokenizer} */
+            let tokenizer;
+            beforeAll(async () => {
+                model = await CohereForCausalLM.from_pretrained(model_id, {
+                    // TODO move to config
+                    ...DEFAULT_MODEL_OPTIONS,
+                });
+                tokenizer = await CohereTokenizer.from_pretrained(model_id);
+                tokenizer.padding_side = 'left';
+            }, MAX_MODEL_LOAD_TIME);
+
+            it('batch_size=1', async () => {
+                const inputs = tokenizer('hello');
+                const outputs = await model.generate({
+                    ...inputs,
+                    max_length: 10,
+                });
+                expect(outputs.tolist()).toEqual([
+                    [5n, 203n, 790n, 87n, 87n, 87n, 87n, 87n, 87n, 87n]
+                ]);
+            }, MAX_TEST_EXECUTION_TIME);
+
+            it('batch_size>1', async () => {
+                const inputs = tokenizer(['hello', 'hello world'], { padding: true });
+                const outputs = await model.generate({
+                    ...inputs,
+                    max_length: 10,
+                });
+                expect(outputs.tolist()).toEqual([
+                    [0n, 0n, 5n, 203n, 790n, 87n, 87n, 87n, 87n, 87n],
+                    [5n, 203n, 790n, 87n, 214n, 741n, 741n, 741n, 741n, 741n]
+                ]);
+            }, MAX_TEST_EXECUTION_TIME);
+
+            afterAll(async () => {
+                await model?.dispose();
+            }, MAX_MODEL_DISPOSE_TIME);
+        });
+    });
+
+
     describe('gemma', () => {
         describe('GemmaForCausalLM', () => {
             const model_id = 'Xenova/tiny-random-GemmaForCausalLM';
@@ -1171,6 +1270,435 @@ describe('Tiny random models', () => {
         });
     });
 });
+
+describe('Tiny random pipelines', () => {
+    describe('fill-mask', () => {
+        const model_id = 'hf-internal-testing/tiny-random-BertForMaskedLM';
+
+        /** @type {FillMaskPipeline} */
+        let pipe;
+        beforeAll(async () => {
+            pipe = await pipeline('fill-mask', model_id, {
+                // TODO move to config
+                ...DEFAULT_MODEL_OPTIONS,
+            });
+        }, MAX_MODEL_LOAD_TIME);
+
+        describe('batch_size=1', () => {
+            it('default (top_k=5)', async () => {
+                const output = await pipe('a [MASK] c');
+                const target = [
+                    { score: 0.0013377574505284429, token: 854, token_str: '##ο', sequence: 'aο c' },
+                    { score: 0.001248967950232327, token: 962, token_str: '##ち', sequence: 'aち c' },
+                    { score: 0.0012304208939895034, token: 933, token_str: '##ع', sequence: 'aع c' },
+                    { score: 0.0012301815440878272, token: 313, token_str: 'ფ', sequence: 'a ფ c' },
+                    { score: 0.001222139224410057, token: 624, token_str: '未', sequence: 'a 未 c' },
+                ]
+                compare(output, target, 1e-5);
+            });
+            it('custom (top_k=2)', async () => {
+                const output = await pipe('a [MASK] c', { top_k: 2 });
+                const target = [
+                    { score: 0.0013377574505284429, token: 854, token_str: '##ο', sequence: 'aο c' },
+                    { score: 0.001248967950232327, token: 962, token_str: '##ち', sequence: 'aち c' },
+                ]
+                compare(output, target, 1e-5);
+            });
+        });
+
+        describe('batch_size>1', () => {
+            it('default (top_k=5)', async () => {
+                const output = await pipe([
+                    'a [MASK] c',
+                    'a b [MASK] c',
+                ]);
+                const target = [
+                    [
+                        { score: 0.0013377574505284429, token: 854, token_str: '##ο', sequence: 'aο c' },
+                        { score: 0.001248967950232327, token: 962, token_str: '##ち', sequence: 'aち c' },
+                        { score: 0.0012304208939895034, token: 933, token_str: '##ع', sequence: 'aع c' },
+                        { score: 0.0012301815440878272, token: 313, token_str: 'ფ', sequence: 'a ფ c' },
+                        { score: 0.001222139224410057, token: 624, token_str: '未', sequence: 'a 未 c' }
+                    ],
+                    [
+                        { score: 0.0013287801994010806, token: 962, token_str: '##ち', sequence: 'a bち c' },
+                        { score: 0.0012486606137827039, token: 823, token_str: '##ن', sequence: 'a bن c' },
+                        { score: 0.0012320734094828367, token: 1032, token_str: '##ც', sequence: 'a bც c' },
+                        { score: 0.0012295148335397243, token: 854, token_str: '##ο', sequence: 'a bο c' },
+                        { score: 0.0012277684872969985, token: 624, token_str: '未', sequence: 'a b 未 c' }
+                    ]
+                ]
+                compare(output, target, 1e-5);
+            });
+            it('custom (top_k=2)', async () => {
+                const output = await pipe([
+                    'a [MASK] c',
+                    'a b [MASK] c',
+                ], { top_k: 2 });
+                const target = [
+                    [
+                        { score: 0.0013377574505284429, token: 854, token_str: '##ο', sequence: 'aο c' },
+                        { score: 0.001248967950232327, token: 962, token_str: '##ち', sequence: 'aち c' }
+                    ],
+                    [
+                        { score: 0.0013287801994010806, token: 962, token_str: '##ち', sequence: 'a bち c' },
+                        { score: 0.0012486606137827039, token: 823, token_str: '##ن', sequence: 'a bن c' },
+                    ]
+                ]
+                compare(output, target, 1e-5);
+            });
+        });
+
+        afterAll(async () => {
+            await pipe?.dispose();
+        }, MAX_MODEL_DISPOSE_TIME);
+    });
+
+    describe('text-classification', () => {
+        const model_id = 'hf-internal-testing/tiny-random-BertForSequenceClassification';
+
+        /** @type {TextClassificationPipeline} */
+        let pipe;
+        beforeAll(async () => {
+            pipe = await pipeline('text-classification', model_id, {
+                // TODO move to config
+                ...DEFAULT_MODEL_OPTIONS,
+            });
+        }, MAX_MODEL_LOAD_TIME);
+
+        describe('batch_size=1', () => {
+            it('default (top_k=1)', async () => {
+                const output = await pipe('a');
+                const target = [
+                    { label: 'LABEL_0', score: 0.5076976418495178 }
+                ]
+                compare(output, target, 1e-5);
+            });
+            it('custom (top_k=2)', async () => {
+                const output = await pipe('a', { top_k: 2 });
+                const target = [
+                    { label: 'LABEL_0', score: 0.5076976418495178 },
+                    { label: 'LABEL_1', score: 0.49230238795280457 }
+                ]
+                compare(output, target, 1e-5);
+            });
+        });
+
+        describe('batch_size>1', () => {
+            it('default (top_k=1)', async () => {
+                const output = await pipe(['a', 'b c']);
+                const target = [
+                    { label: 'LABEL_0', score: 0.5076976418495178 },
+                    { label: 'LABEL_0', score: 0.5077522993087769 },
+                ]
+                compare(output, target, 1e-5);
+            });
+            it('custom (top_k=2)', async () => {
+                const output = await pipe(['a', 'b c'], { top_k: 2 });
+                const target = [
+                    [
+                        { label: 'LABEL_0', score: 0.5076976418495178 },
+                        { label: 'LABEL_1', score: 0.49230238795280457 }
+                    ],
+                    [
+                        { label: 'LABEL_0', score: 0.5077522993087769 },
+                        { label: 'LABEL_1', score: 0.49224773049354553 }
+                    ]
+                ];
+                compare(output, target, 1e-5);
+            });
+
+            it('multi_label_classification', async () => {
+
+                const problem_type = pipe.model.config.problem_type;
+                pipe.model.config.problem_type = 'multi_label_classification';
+
+                const output = await pipe(['a', 'b c'], { top_k: 2 });
+                const target = [
+                    [
+                        { label: 'LABEL_0', score: 0.5001373887062073 },
+                        { label: 'LABEL_1', score: 0.49243971705436707 }
+                    ],
+                    [
+                        { label: 'LABEL_0', score: 0.5001326203346252 },
+                        { label: 'LABEL_1', score: 0.492380291223526 }
+                    ]
+                ];
+                compare(output, target, 1e-5);
+
+                // Reset problem type
+                pipe.model.config.problem_type = problem_type;
+            });
+        });
+
+        afterAll(async () => {
+            await pipe?.dispose();
+        }, MAX_MODEL_DISPOSE_TIME);
+    });
+
+    describe('token-classification', () => {
+        const model_id = 'hf-internal-testing/tiny-random-BertForTokenClassification';
+
+        /** @type {TokenClassificationPipeline} */
+        let pipe;
+        beforeAll(async () => {
+            pipe = await pipeline('token-classification', model_id, {
+                // TODO move to config
+                ...DEFAULT_MODEL_OPTIONS,
+            });
+        }, MAX_MODEL_LOAD_TIME);
+
+        describe('batch_size=1', () => {
+            it('default', async () => {
+                const output = await pipe('1 2 3');
+
+                // TODO: Add start/end to target
+                const target = [
+                    {
+                        entity: 'LABEL_0', score: 0.5292708, index: 1, word: '1',
+                        // 'start': 0, 'end': 1
+                    },
+                    {
+                        entity: 'LABEL_0', score: 0.5353687, index: 2, word: '2',
+                        // 'start': 2, 'end': 3
+                    },
+                    {
+                        entity: 'LABEL_1', score: 0.51381934, index: 3, word: '3',
+                        // 'start': 4, 'end': 5
+                    }
+                ]
+                compare(output, target, 1e-5);
+            });
+            it('custom (ignore_labels set)', async () => {
+                const output = await pipe('1 2 3', { ignore_labels: ['LABEL_0'] });
+                const target = [
+                    {
+                        entity: 'LABEL_1', score: 0.51381934, index: 3, word: '3',
+                        // 'start': 4, 'end': 5
+                    }
+                ]
+                compare(output, target, 1e-5);
+            });
+        });
+
+        describe('batch_size>1', () => {
+            it('default', async () => {
+                const output = await pipe(['1 2 3', '4 5']);
+                const target = [
+                    [
+                        {
+                            entity: 'LABEL_0', score: 0.5292708, index: 1, word: '1',
+                            // 'start': 0, 'end': 1
+                        },
+                        {
+                            entity: 'LABEL_0', score: 0.5353687, index: 2, word: '2',
+                            // 'start': 2, 'end': 3
+                        },
+                        {
+                            entity: 'LABEL_1', score: 0.51381934, index: 3, word: '3',
+                            // 'start': 4, 'end': 5
+                        }
+                    ],
+                    [
+                        {
+                            entity: 'LABEL_0', score: 0.5432807, index: 1, word: '4',
+                            // 'start': 0, 'end': 1
+                        },
+                        {
+                            entity: 'LABEL_1', score: 0.5007693, index: 2, word: '5',
+                            // 'start': 2, 'end': 3
+                        }
+                    ]
+                ]
+                compare(output, target, 1e-5);
+            });
+            it('custom (ignore_labels set)', async () => {
+                const output = await pipe(['1 2 3', '4 5'], { ignore_labels: ['LABEL_0'] });
+                const target = [
+                    [
+                        {
+                            entity: 'LABEL_1', score: 0.51381934, index: 3, word: '3',
+                            // 'start': 4, 'end': 5
+                        }
+                    ],
+                    [
+                        {
+                            entity: 'LABEL_1', score: 0.5007693, index: 2, word: '5',
+                            // 'start': 2, 'end': 3
+                        }
+                    ]
+                ]
+                compare(output, target, 1e-5);
+            });
+        });
+
+        afterAll(async () => {
+            await pipe?.dispose();
+        }, MAX_MODEL_DISPOSE_TIME);
+    });
+
+    describe('question-answering', () => {
+        const model_id = 'hf-internal-testing/tiny-random-BertForQuestionAnswering';
+
+        /** @type {QuestionAnsweringPipeline} */
+        let pipe;
+        beforeAll(async () => {
+            pipe = await pipeline('question-answering', model_id, {
+                // TODO move to config
+                ...DEFAULT_MODEL_OPTIONS,
+            });
+        }, MAX_MODEL_LOAD_TIME);
+
+        describe('batch_size=1', () => {
+            it('default (top_k=1)', async () => {
+                const output = await pipe('a', 'b c');
+                console.log('output', output)
+                const target = { score: 0.11395696550607681, /* start: 0, end: 1, */ answer: 'b' };
+                compare(output, target, 1e-5);
+            });
+            it('custom (top_k=3)', async () => {
+                const output = await pipe('a', 'b c', { top_k: 3 });
+                const target = [
+                    { score: 0.11395696550607681, /* start: 0, end: 1, */ answer: 'b' },
+                    { score: 0.11300431191921234, /* start: 2, end: 3, */ answer: 'c' },
+                    { score: 0.10732574015855789, /* start: 0, end: 3, */ answer: 'b c' }
+                ]
+                compare(output, target, 1e-5);
+            });
+        });
+
+        afterAll(async () => {
+            await pipe?.dispose();
+        }, MAX_MODEL_DISPOSE_TIME);
+    });
+
+    describe('image-classification', () => {
+        const model_id = 'hf-internal-testing/tiny-random-vit';
+        const urls = [
+            'https://huggingface.co/datasets/Xenova/transformers.js-docs/resolve/main/white-image.png',
+            'https://huggingface.co/datasets/Xenova/transformers.js-docs/resolve/main/blue-image.png',
+        ];
+
+        /** @type {ImageClassificationPipeline} */
+        let pipe;
+        beforeAll(async () => {
+            pipe = await pipeline('image-classification', model_id, {
+                // TODO move to config
+                ...DEFAULT_MODEL_OPTIONS,
+            });
+        }, MAX_MODEL_LOAD_TIME);
+
+        describe('batch_size=1', () => {
+
+            it('default (top_k=5)', async () => {
+                const output = await pipe(urls[0]);
+                const target = [
+                    { label: 'LABEL_1', score: 0.5020533800125122 },
+                    { label: 'LABEL_0', score: 0.4979466497898102 }
+                ]
+                compare(output, target, 1e-5);
+            });
+            it('custom (top_k=1)', async () => {
+                const output = await pipe(urls[0], { top_k: 1 });
+                const target = [{ label: 'LABEL_1', score: 0.5020533800125122 }]
+                compare(output, target, 1e-5);
+            });
+        });
+
+        describe('batch_size>1', () => {
+            it('default (top_k=5)', async () => {
+                const output = await pipe(urls);
+                const target = [
+                    [
+                        { label: 'LABEL_1', score: 0.5020533800125122 },
+                        { label: 'LABEL_0', score: 0.4979466497898102 }
+                    ],
+                    [
+                        { label: 'LABEL_1', score: 0.519227921962738 },
+                        { label: 'LABEL_0', score: 0.4807720482349396 }
+                    ]
+                ]
+                compare(output, target, 1e-5);
+            });
+            it('custom (top_k=1)', async () => {
+                const output = await pipe(urls, { top_k: 1 });
+                const target = [
+                    [{ label: 'LABEL_1', score: 0.5020533800125122 }],
+                    [{ label: 'LABEL_1', score: 0.519227921962738 }]
+                ]
+                compare(output, target, 1e-5);
+            });
+        });
+
+        afterAll(async () => {
+            await pipe?.dispose();
+        }, MAX_MODEL_DISPOSE_TIME);
+    });
+
+    describe('audio-classification', () => {
+        const model_id = 'hf-internal-testing/tiny-random-unispeech';
+        const audios = [
+            new Float32Array(16000).fill(0),
+            Float32Array.from({ length: 16000 }, (_, i) => i),
+        ]
+
+        /** @type {ImageClassificationPipeline} */
+        let pipe;
+        beforeAll(async () => {
+            pipe = await pipeline('audio-classification', model_id, {
+                // TODO move to config
+                ...DEFAULT_MODEL_OPTIONS,
+            });
+        }, MAX_MODEL_LOAD_TIME);
+
+        describe('batch_size=1', () => {
+
+            it('default (top_k=5)', async () => {
+                const output = await pipe(audios[0]);
+                const target = [
+                    { score: 0.5043687224388123, label: 'LABEL_0' },
+                    { score: 0.4956313371658325, label: 'LABEL_1' }
+                ]
+                compare(output, target, 1e-5);
+            });
+            it('custom (top_k=1)', async () => {
+                const output = await pipe(audios[0], { top_k: 1 });
+                const target = [{ score: 0.5043687224388123, label: 'LABEL_0' }]
+                compare(output, target, 1e-5);
+            });
+        });
+
+        describe('batch_size>1', () => {
+            it('default (top_k=5)', async () => {
+                const output = await pipe(audios);
+                const target = [
+                    [
+                        { score: 0.5043687224388123, label: 'LABEL_0' },
+                        { score: 0.4956313371658325, label: 'LABEL_1' }
+                    ],
+                    [
+                        { score: 0.5187293887138367, label: 'LABEL_0' },
+                        { score: 0.4812707006931305, label: 'LABEL_1' }
+                    ]
+                ]
+                compare(output, target, 1e-5);
+            });
+            it('custom (top_k=1)', async () => {
+                const output = await pipe(audios, { top_k: 1 });
+                const target = [
+                    [{ score: 0.5043687224388123, label: 'LABEL_0' }],
+                    [{ score: 0.5187293887138367, label: 'LABEL_0' }]
+                ]
+                compare(output, target, 1e-5);
+            });
+        });
+
+        afterAll(async () => {
+            await pipe?.dispose();
+        }, MAX_MODEL_DISPOSE_TIME);
+    });
+});
+
 
 describe('PKV caching', () => {
     describe('LlamaForCausalLM', () => {

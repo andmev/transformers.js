@@ -476,6 +476,7 @@ export class Tensor {
         const norm = this.norm(p, dim, true);
 
         const this_data = this.data;
+        const norm_data = norm.data;
         for (let i = 0; i < this_data.length; ++i) {
 
             // Calculate the index in the resulting array
@@ -492,7 +493,7 @@ export class Tensor {
             }
 
             // Divide by normalized value
-            this_data[i] /= norm.data[resultIndex];
+            this_data[i] /= norm_data[resultIndex];
         }
 
         return this;
@@ -610,15 +611,16 @@ export class Tensor {
             }
         }
 
+        const this_data = this.data;
         if (inferredIndex !== -1) {
             // Some dimension must be inferred
             const productOther = dims.reduce((product, curr, index) => {
                 return index !== inferredIndex ? product * curr : product
             }, 1);
 
-            dims[inferredIndex] = this.data.length / productOther;
+            dims[inferredIndex] = this_data.length / productOther;
         }
-        return new Tensor(this.type, this.data, dims); // NOTE: uses same underlying storage
+        return new Tensor(this.type, this_data, dims); // NOTE: uses same underlying storage
     }
 
     neg_() {
@@ -897,32 +899,35 @@ export async function topk(x, k) {
 export function mean_pooling(last_hidden_state, attention_mask) {
     // last_hidden_state: [batchSize, seqLength, embedDim]
     // attention_mask:    [batchSize, seqLength]
+    const lastHiddenStateData = last_hidden_state.data;
+    const attentionMaskData = attention_mask.data;
 
-    let shape = [last_hidden_state.dims[0], last_hidden_state.dims[2]];
+    const shape = [last_hidden_state.dims[0], last_hidden_state.dims[2]];
+
     // @ts-ignore
-    let returnedData = new last_hidden_state.data.constructor(shape[0] * shape[1]);
-    let [batchSize, seqLength, embedDim] = last_hidden_state.dims;
+    const returnedData = new lastHiddenStateData.constructor(shape[0] * shape[1]);
+    const [batchSize, seqLength, embedDim] = last_hidden_state.dims;
 
     let outIndex = 0;
     for (let i = 0; i < batchSize; ++i) {
-        let offset = i * embedDim * seqLength;
+        const offset = i * embedDim * seqLength;
 
         for (let k = 0; k < embedDim; ++k) {
             let sum = 0;
             let count = 0;
 
-            let attnMaskOffset = i * seqLength;
-            let offset2 = offset + k;
+            const attnMaskOffset = i * seqLength;
+            const offset2 = offset + k;
             // Pool over all words in sequence
             for (let j = 0; j < seqLength; ++j) {
                 // index into attention mask
-                let attn = Number(attention_mask.data[attnMaskOffset + j]);
+                const attn = Number(attentionMaskData[attnMaskOffset + j]);
 
                 count += attn;
-                sum += last_hidden_state.data[offset2 + j * embedDim] * attn;
+                sum += lastHiddenStateData[offset2 + j * embedDim] * attn;
             }
 
-            let avg = sum / count;
+            const avg = sum / count;
             returnedData[outIndex++] = avg;
         }
     }
@@ -956,15 +961,19 @@ export function layer_norm(input, normalized_shape, {
     }
 
     const [std, mean] = std_mean(input, 1, 0, true);
+    const stdData = /** @type {Float32Array} */(std.data);
+    const meanData = /** @type {Float32Array} */(mean.data);
+
+    const inputData = /** @type {Float32Array} */(input.data);
 
     // @ts-ignore
-    const returnedData = new input.data.constructor(input.data.length);
+    const returnedData = new inputData.constructor(inputData.length);
 
     for (let i = 0; i < batchSize; ++i) {
         const offset = i * featureDim;
         for (let j = 0; j < featureDim; ++j) {
             const offset2 = offset + j;
-            returnedData[offset2] = (input.data[offset2] - mean.data[i]) / (std.data[i] + eps);
+            returnedData[offset2] = (inputData[offset2] - meanData[i]) / (stdData[i] + eps);
         }
     }
     return new Tensor(input.type, returnedData, input.dims);
@@ -1058,9 +1067,10 @@ export function cat(tensors, dim = 0) {
         // Handle special case for performance reasons
 
         let offset = 0;
-        for (let t of tensors) {
-            result.set(t.data, offset);
-            offset += t.data.length;
+        for (const tensor of tensors) {
+            const tensorData = tensor.data;
+            result.set(tensorData, offset);
+            offset += tensorData.length;
         }
 
     } else {
@@ -1068,15 +1078,15 @@ export function cat(tensors, dim = 0) {
         let currentDim = 0;
 
         for (let t = 0; t < tensors.length; ++t) {
-            let tensor = tensors[t];
+            const { data, dims } = tensors[t];
 
             // Iterate over the data array
-            for (let i = 0; i < tensor.data.length; ++i) {
+            for (let i = 0; i < data.length; ++i) {
                 // Calculate the index in the resulting array
                 let resultIndex = 0;
 
-                for (let j = tensor.dims.length - 1, num = i, resultMultiplier = 1; j >= 0; --j) {
-                    const size = tensor.dims[j];
+                for (let j = dims.length - 1, num = i, resultMultiplier = 1; j >= 0; --j) {
+                    const size = dims[j];
                     let index = num % size;
                     if (j === dim) {
                         index += currentDim;
@@ -1086,10 +1096,10 @@ export function cat(tensors, dim = 0) {
                     num = Math.floor(num / size);
                 }
                 // Accumulate the value at the current index
-                result[resultIndex] = tensor.data[i];
+                result[resultIndex] = data[i];
             }
 
-            currentDim += tensor.dims[dim];
+            currentDim += dims[dim];
         }
     }
     return new Tensor(resultType, result, resultDims);
@@ -1117,14 +1127,14 @@ export function stack(tensors, dim = 0) {
  * @returns {Tensor[]} A tuple of (std, mean) tensors.
  */
 export function std_mean(input, dim = null, correction = 1, keepdim = false) {
+    const inputData = /** @type {Float32Array} */(input.data);
+    const inputDims = input.dims;
 
     if (dim === null) {
         // None to reduce over all dimensions.
-        // @ts-ignore
-        const sum = input.data.reduce((a, b) => a + b, 0);
-        const mean = sum / input.data.length;
-        // @ts-ignore
-        const std = Math.sqrt(input.data.reduce((a, b) => a + (b - mean) ** 2, 0) / (input.data.length - correction));
+        const sum = inputData.reduce((a, b) => a + b, 0);
+        const mean = sum / inputData.length;
+        const std = Math.sqrt(inputData.reduce((a, b) => a + (b - mean) ** 2, 0) / (inputData.length - correction));
 
         const meanTensor = new Tensor(input.type, [mean], [/* scalar */]);
         const stdTensor = new Tensor(input.type, [std], [/* scalar */]);
@@ -1133,26 +1143,27 @@ export function std_mean(input, dim = null, correction = 1, keepdim = false) {
     }
 
     // Negative indexing
-    dim = safeIndex(dim, input.dims.length);
+    dim = safeIndex(dim, inputDims.length);
 
     const meanTensor = mean(input, dim, keepdim);
+    const meanTensorData = meanTensor.data;
 
     // Calculate the shape of the resulting array after summation
-    const resultDims = input.dims.slice(); // Copy the original dimensions
+    const resultDims = inputDims.slice(); // Copy the original dimensions
     resultDims[dim] = 1; // Remove the specified axis
 
     // Create a new array to store the accumulated values
     // @ts-ignore
-    const result = new input.data.constructor(input.data.length / input.dims[dim]);
+    const result = new inputData.constructor(inputData.length / inputDims[dim]);
 
     // Iterate over the data array
-    for (let i = 0; i < input.data.length; ++i) {
+    for (let i = 0; i < inputData.length; ++i) {
 
         // Calculate the index in the resulting array
         let resultIndex = 0;
 
-        for (let j = input.dims.length - 1, num = i, resultMultiplier = 1; j >= 0; --j) {
-            const size = input.dims[j];
+        for (let j = inputDims.length - 1, num = i, resultMultiplier = 1; j >= 0; --j) {
+            const size = inputDims[j];
             if (j !== dim) {
                 const index = num % size;
                 resultIndex += index * resultMultiplier;
@@ -1162,11 +1173,11 @@ export function std_mean(input, dim = null, correction = 1, keepdim = false) {
         }
 
         // Accumulate the value at the current index
-        result[resultIndex] += (input.data[i] - meanTensor.data[resultIndex]) ** 2;
+        result[resultIndex] += (inputData[i] - meanTensorData[resultIndex]) ** 2;
     }
 
     for (let i = 0; i < result.length; ++i) {
-        result[i] = Math.sqrt(result[i] / (input.dims[dim] - correction));
+        result[i] = Math.sqrt(result[i] / (inputDims[dim] - correction));
     }
 
     if (!keepdim) {
@@ -1187,33 +1198,35 @@ export function std_mean(input, dim = null, correction = 1, keepdim = false) {
  * @returns {Tensor} A new tensor with means taken along the specified dimension.
  */
 export function mean(input, dim = null, keepdim = false) {
+    const inputData = /** @type {Float32Array} */(input.data);
 
     if (dim === null) {
         // None to reduce over all dimensions.
         // @ts-ignore
-        let val = input.data.reduce((a, b) => a + b, 0);
-        return new Tensor(input.type, [val / input.data.length], [/* scalar */]);
+        const val = inputData.reduce((a, b) => a + b, 0);
+        return new Tensor(input.type, [val / inputData.length], [/* scalar */]);
     }
+    const inputDims = input.dims;
 
     // Negative indexing
-    dim = safeIndex(dim, input.dims.length);
+    dim = safeIndex(dim, inputDims.length);
 
     // Calculate the shape of the resulting array after summation
-    const resultDims = input.dims.slice(); // Copy the original dimensions
+    const resultDims = inputDims.slice(); // Copy the original dimensions
     resultDims[dim] = 1; // Remove the specified axis
 
     // Create a new array to store the accumulated values
     // @ts-ignore
-    const result = new input.data.constructor(input.data.length / input.dims[dim]);
+    const result = new inputData.constructor(inputData.length / inputDims[dim]);
 
     // Iterate over the data array
-    for (let i = 0; i < input.data.length; ++i) {
+    for (let i = 0; i < inputData.length; ++i) {
 
         // Calculate the index in the resulting array
         let resultIndex = 0;
 
-        for (let j = input.dims.length - 1, num = i, resultMultiplier = 1; j >= 0; --j) {
-            const size = input.dims[j];
+        for (let j = inputDims.length - 1, num = i, resultMultiplier = 1; j >= 0; --j) {
+            const size = inputDims[j];
             if (j !== dim) {
                 const index = num % size;
                 resultIndex += index * resultMultiplier;
@@ -1223,12 +1236,12 @@ export function mean(input, dim = null, keepdim = false) {
         }
 
         // Accumulate the value at the current index
-        result[resultIndex] += input.data[i];
+        result[resultIndex] += inputData[i];
     }
 
-    if (input.dims[dim] !== 1) {
+    if (inputDims[dim] !== 1) {
         for (let i = 0; i < result.length; ++i) {
-            result[i] = result[i] / input.dims[dim];
+            result[i] = result[i] / inputDims[dim];
         }
     }
 
@@ -1239,99 +1252,6 @@ export function mean(input, dim = null, keepdim = false) {
     return new Tensor(input.type, result, resultDims);
 }
 
-
-/**
- *
- * Measures similarity between two temporal sequences (e.g., input audio and output tokens
- * to generate token-level timestamps).
- * @param {Tensor} matrix 
- * @returns {number[][]}
- */
-export function dynamicTimeWarping(matrix) {
-    const [output_length, input_length] = matrix.dims;
-
-    const outputShape = [output_length + 1, input_length + 1];
-
-    const cost = new Tensor(
-        'float32',
-        new Float32Array(outputShape[0] * outputShape[1]).fill(Infinity),
-        outputShape
-    );
-
-    const trace = new Tensor(
-        'float32',
-        new Float32Array(outputShape[0] * outputShape[1]).fill(-1),
-        outputShape
-    )
-
-    // same as `cost[0][0] = 0`;
-    cost[0].data[0] = 0;
-
-    for (let j = 1; j < input_length + 1; ++j) {
-        for (let i = 1; i < output_length + 1; ++i) {
-
-            const c0 = cost[i - 1][j - 1].item();
-            const c1 = cost[i - 1][j].item();
-            const c2 = cost[i][j - 1].item();
-
-            let c, t;
-            if (c0 < c1 && c0 < c2) {
-                c = c0;
-                t = 0;
-            } else if (c1 < c0 && c1 < c2) {
-                c = c1;
-                t = 1;
-            } else {
-                c = c2;
-                t = 2;
-            }
-
-            cost[i].data[j] = matrix[i - 1][j - 1].item() + c;
-            trace[i].data[j] = t;
-        }
-    }
-
-    // backtrace
-    let i = output_length;
-    let j = input_length;
-
-    // @ts-ignore
-    trace.data.fill(2, 0, outputShape[1]) // trace[0, :] = 2
-    for (let i = 0; i < outputShape[0]; ++i) { // trace[:, 0] = 1
-        trace[i].data[0] = 1;
-    }
-
-    let text_indices = [];
-    let time_indices = [];
-
-    while (i > 0 || j > 0) {
-        text_indices.push(i - 1);
-        time_indices.push(j - 1);
-
-        const t = trace[i][j].item();
-        switch (t) {
-            case 0:
-                --i; --j;
-                break;
-            case 1:
-                --i;
-                break;
-            case 2:
-                --j;
-                break;
-            default:
-                throw new Error(
-                    `Internal error in dynamic time warping. Unexpected trace[${i}, ${j}]. Please file a bug report.`
-                )
-        }
-    }
-
-    text_indices.reverse();
-    time_indices.reverse();
-
-    return [text_indices, time_indices];
-
-}
 
 function dimsToStride(dims) {
     const stride = new Array(dims.length);

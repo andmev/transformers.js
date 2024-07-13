@@ -95,7 +95,6 @@ import {
 
 import {
     cat,
-    dynamicTimeWarping,
     full_like,
     mean,
     ones,
@@ -106,7 +105,7 @@ import {
     zeros_like,
 } from './utils/tensor.js';
 
-import { medianFilter } from './utils/maths.js';
+import { dynamic_time_warping, medianFilter } from './utils/maths.js';
 import { EosTokenCriteria, MaxLengthCriteria, StoppingCriteriaList } from './generation/stopping_criteria.js';
 import { LogitsSampler } from './generation/logits_sampler.js';
 import { apis } from './env.js';
@@ -152,7 +151,7 @@ async function getSession(pretrained_model_name_or_path, fileName, options) {
         if (device.hasOwnProperty(fileName)) {
             device = device[fileName];
         } else {
-            console.warn(`Device not specified for ${fileName}. Using the default device.`);
+            console.warn(`device not specified for "${fileName}". Using the default device.`);
             device = null;
         }
     }
@@ -170,7 +169,7 @@ async function getSession(pretrained_model_name_or_path, fileName, options) {
             dtype = dtype[fileName];
         } else {
             dtype = DEFAULT_DEVICE_DTYPE_MAPPING[executionProviders[0]];
-            console.warn(`Dtype not specified for ${fileName}. Using the default dtype: ${dtype}.`);
+            console.warn(`dtype not specified for "${fileName}". Using the default dtype for this device (${dtype}).`);
         }
     }
 
@@ -195,7 +194,14 @@ async function getSession(pretrained_model_name_or_path, fileName, options) {
     // handle onnx external data files
     /** @type {Promise<{path: string, data: Uint8Array}>[]} */
     let externalDataPromises = [];
-    if (options.use_external_data_format) {
+    if (options.use_external_data_format && (
+        options.use_external_data_format === true ||
+        (
+            typeof options.use_external_data_format === 'object' &&
+            options.use_external_data_format.hasOwnProperty(fileName) &&
+            options.use_external_data_format[fileName] === true
+        )
+    )) {
         if (apis.IS_NODE_ENV) {
             throw new Error('External data format is not yet supported in Node.js');
         }
@@ -461,9 +467,6 @@ async function seq2seqForward(self, model_inputs) {
 
     const decoderResults = await decoderForward(self, other_decoder_inputs, true);
 
-    // Get cross attention and/or decoder attentions if they are present
-    // const attns = self.getAttentions(decoderResults);
-
     return decoderResults;
 }
 
@@ -476,9 +479,13 @@ async function seq2seqForward(self, model_inputs) {
  */
 async function encoderForward(self, model_inputs) {
     const session = self.sessions['model'];
-    const encoderFeeds = Object.create(null);
-    for (const key of session.inputNames) {
-        encoderFeeds[key] = model_inputs[key];
+    const encoderFeeds = pick(model_inputs, session.inputNames);
+
+    if (session.inputNames.includes('inputs_embeds') && !encoderFeeds.inputs_embeds) {
+        if (!model_inputs.input_ids) {
+            throw new Error('Both `input_ids` and `inputs_embeds` are missing in the model inputs.');
+        }
+        encoderFeeds.inputs_embeds = await self.encode_text({ input_ids: model_inputs.input_ids });
     }
     if (session.inputNames.includes('token_type_ids') && !encoderFeeds.token_type_ids) {
         // Assign default `token_type_ids` (all zeroes) to the `encoderFeeds` if the model expects it,
@@ -693,6 +700,15 @@ function encoder_decoder_prepare_inputs_for_generation(self, input_ids, model_in
 
     return new_model_inputs;
 }
+
+function image_text_to_text_prepare_inputs_for_generation(self, ...args) {
+    if (self.config.is_encoder_decoder) {
+        return encoder_decoder_prepare_inputs_for_generation(self, ...args);
+    } else {
+        return decoder_prepare_inputs_for_generation(self, ...args);
+    }
+
+}
 //////////////////////////////////////////////////
 
 //////////////////////////////////////////////////
@@ -720,28 +736,34 @@ export class PreTrainedModel extends Callable {
         this._forward = null;
 
         this._prepare_inputs_for_generation = null;
-        if (modelType === MODEL_TYPES.DecoderOnly) {
-            this.can_generate = true;
+        switch (modelType) {
+            case MODEL_TYPES.DecoderOnly:
+                this.can_generate = true;
+                this._forward = decoderForward;
+                this._prepare_inputs_for_generation = decoder_prepare_inputs_for_generation;
+                break;
+            case MODEL_TYPES.Seq2Seq:
+            case MODEL_TYPES.Vision2Seq:
+            case MODEL_TYPES.Musicgen:
+                this.can_generate = true;
 
-            this._forward = decoderForward;
-            this._prepare_inputs_for_generation = decoder_prepare_inputs_for_generation;
+                this._forward = seq2seqForward;
+                this._prepare_inputs_for_generation = encoder_decoder_prepare_inputs_for_generation;
+                break;
 
-        } else if (modelType === MODEL_TYPES.Seq2Seq || modelType === MODEL_TYPES.Vision2Seq || modelType === MODEL_TYPES.Musicgen) {
-            this.can_generate = true;
+            case MODEL_TYPES.EncoderDecoder:
+                this._forward = seq2seqForward;
+                break;
+            case MODEL_TYPES.ImageTextToText:
+                this.can_generate = true;
+                this._forward = imageTextToTextForward;
+                this._prepare_inputs_for_generation = image_text_to_text_prepare_inputs_for_generation;
+                break;
 
-            this._forward = seq2seqForward;
-            this._prepare_inputs_for_generation = encoder_decoder_prepare_inputs_for_generation;
-
-        } else if (modelType === MODEL_TYPES.EncoderDecoder) {
-            this._forward = seq2seqForward;
-
-        } else if (modelType === MODEL_TYPES.ImageTextToText) {
-            this.can_generate = true;
-            this._forward = imageTextToTextForward;
-            this._prepare_inputs_for_generation = decoder_prepare_inputs_for_generation;
-
-        } else { // should be MODEL_TYPES.EncoderOnly
-            this._forward = encoderForward;
+            default:
+                // should be MODEL_TYPES.EncoderOnly
+                this._forward = encoderForward;
+                break;
         }
 
         if (this.can_generate) {
@@ -813,7 +835,7 @@ export class PreTrainedModel extends Callable {
         const modelName = MODEL_CLASS_TO_NAME_MAPPING.get(this);
         const modelType = MODEL_TYPE_MAPPING.get(modelName);
 
-        options.config = await AutoConfig.from_pretrained(pretrained_model_name_or_path, options);
+        config = options.config = await AutoConfig.from_pretrained(pretrained_model_name_or_path, options);
 
         let info;
         if (modelType === MODEL_TYPES.DecoderOnly) {
@@ -850,12 +872,16 @@ export class PreTrainedModel extends Callable {
             ]);
 
         } else if (modelType === MODEL_TYPES.ImageTextToText) {
+            const sessions = {
+                embed_tokens: 'embed_tokens',
+                vision_encoder: 'vision_encoder',
+                decoder_model_merged: 'decoder_model_merged',
+            }
+            if (config.is_encoder_decoder) {
+                sessions['model'] = 'encoder_model';
+            }
             info = await Promise.all([
-                constructSessions(pretrained_model_name_or_path, {
-                    embed_tokens: 'embed_tokens',
-                    vision_encoder: 'vision_encoder',
-                    decoder_model_merged: 'decoder_model_merged',
-                }, options),
+                constructSessions(pretrained_model_name_or_path, sessions, options),
                 getModelJSON(pretrained_model_name_or_path, 'generation_config.json', false, options),
             ]);
 
@@ -881,7 +907,7 @@ export class PreTrainedModel extends Callable {
         }
 
         // @ts-ignore
-        return new this(options.config, ...info);
+        return new this(config, ...info);
     }
 
     /**
@@ -1228,9 +1254,21 @@ export class PreTrainedModel extends Callable {
     }
 
     async _prepare_encoder_decoder_kwargs_for_generation({ inputs_tensor, model_inputs, model_input_name, generation_config }) {
-        const encoder_kwargs = pick(model_inputs, this.sessions['model'].inputNames);
-
-        let { last_hidden_state } = await encoderForward(this, encoder_kwargs);
+        if (
+            this.sessions['model'].inputNames.includes('inputs_embeds')
+            && !model_inputs.inputs_embeds
+            && '_prepare_inputs_embeds' in this
+        ) {
+            // Encoder expects `inputs_embeds` instead of `input_ids`
+            const { input_ids, pixel_values, attention_mask, ...kwargs } = model_inputs;
+            // @ts-ignore
+            const prepared_inputs = await this._prepare_inputs_embeds(model_inputs);
+            model_inputs = {
+                ...kwargs,
+                ...pick(prepared_inputs, ['inputs_embeds', 'attention_mask']),
+            };
+        }
+        let { last_hidden_state } = await encoderForward(this, model_inputs);
 
         // for classifier free guidance we need to add a 'null' input to our encoder hidden states
         if (generation_config.guidance_scale !== null && generation_config.guidance_scale > 1) {
@@ -1281,6 +1319,11 @@ export class PreTrainedModel extends Callable {
                     length: batch_size,
                 }, () => [decoder_start_token_id]);
             }
+        } else if (!Array.isArray(decoder_input_ids[0])) {
+            // Correct batch size
+            decoder_input_ids = Array.from({
+                length: batch_size,
+            }, () => decoder_input_ids);
         }
 
         decoder_input_ids = toI64Tensor(decoder_input_ids);
@@ -1416,11 +1459,23 @@ export class PreTrainedModel extends Callable {
         // - GenerationMode.BEAM_SAMPLE
         ////////////////////////////////////////////////////
         let past_key_values = null;
+        let attentions = {};
         while (true) {
             // prepare model inputs
             model_inputs = this.prepare_inputs_for_generation(all_input_ids, model_inputs, generation_config);
 
             const outputs = await this.forward(model_inputs);
+
+            if (generation_config.output_attentions && generation_config.return_dict_in_generate) {
+                // Get attentions if they are present
+                const token_attentions = this.getAttentions(outputs);
+                for (const key in token_attentions) {
+                    if (!(key in attentions)) {
+                        attentions[key] = [];
+                    }
+                    attentions[key].push(token_attentions[key]);
+                }
+            }
 
             // Logits are of the form [batch_size, out_seq_length, vocab_size]
             // In most cases, this will be [batch_size, 1, vocab_size]
@@ -1479,187 +1534,14 @@ export class PreTrainedModel extends Callable {
             return {
                 sequences,
                 past_key_values,
+                ...attentions,
                 // TODO:
                 // scores,
                 // logits,
-                // attentions,
             }
         } else {
             return sequences;
         }
-
-        // TODO:
-        // let numOutputTokens = 1;
-        // const maxOutputTokens = numOutputTokens + (generation_config.max_new_tokens ?? Infinity);
-
-        // // Only use max length if max_new_tokens is not provided
-        // const useMaxLength = Number.isInteger(generation_config.max_length) && (generation_config.max_new_tokens ?? null) === null;
-
-        // // console.log('inputs', inputs)
-        // let beams = this.getStartBeams(inputs, generation_config, numOutputTokens, inputs_attention_mask);
-
-        // while (beams.some(x => !x.done) && numOutputTokens < maxOutputTokens) {
-        //     let newest_beams = [];
-        //     for (let beam of beams) {
-        //         if (beam.done) {
-        //             // Add this beam back into the pool
-        //             newest_beams.push(beam);
-        //             continue
-        //         }
-        //         if (useMaxLength && beam.output_token_ids.length >= generation_config.max_length) {
-        //             // Set this beam to done and add it back into the pool
-        //             beam.done = true;
-        //             newest_beams.push(beam);
-        //             continue
-        //         }
-
-        //         // TODO generalize
-        //         let output = await this.runBeam(beam);
-
-
-        //         // add attentions/scores to beam only if user requested
-        //         if (generation_config.output_attentions) {
-        //             this.addAttentionsToBeam(beam, output);
-        //         }
-        //         if (generation_config.output_scores) {
-        //             // TODO add
-        //         }
-
-        //         let logits = output.logits.slice(null, -1, null);
-
-        //         // Apply logits processor
-        //         logits_processor(beam.output_token_ids, logits);
-
-        //         let sampledTokens = sampler(logits);
-        //         for (let [newTokenId, logProb] of sampledTokens) {
-        //             // use previous beam as a starting point
-        //             let newBeam = { ...beam };
-
-        //             // update new beam
-        //             // @ts-ignore
-        //             this.updateBeam(newBeam, newTokenId);
-
-        //             newBeam.score += logProb;
-
-        //             if (eos_token_ids && eos_token_ids.includes(newTokenId)) {
-        //                 newBeam.done = true;
-        //             }
-
-        //             newest_beams.push(newBeam);
-        //         }
-        //     }
-        //     ++numOutputTokens;
-
-        //     // Next, we get the best beams, per ID
-        //     newest_beams = this.groupBeams(newest_beams).map(
-        //         group => group
-        //             .sort((a, b) => b.score - a.score)      // sort by score
-        //             .slice(0, generation_config.num_beams)  // remove outside beam width
-        //     );
-
-        //     // Flatten beams
-        //     beams = newest_beams.flat();
-
-        //     // Run callback
-        //     if (generation_config.callback_function) {
-        //         throw new Error("Callback function not yet implemented")
-        //         generation_config.callback_function(beams);
-        //     }
-        // }
-
-        // // TODO: Ensure that we can return non-batched outputs
-
-        // const groupedBeams = this.groupBeams(beams);
-
-        // const getFlattened = (key) => groupedBeams.map(
-        //     batch => {
-        //         if (generation_config.num_return_sequences > 1) {
-        //             return batch.slice(0, generation_config.num_return_sequences).map(x => x[key]);
-        //         } else {
-        //             return [batch[0][key]];
-        //         }
-        //     }
-        // ).flat(); // Flatten across batches (depth=1)
-
-        // const sequences = getFlattened('output_token_ids'); // [1, seqLength]
-
-        // if (generation_config.return_dict_in_generate) {
-        //     // NOTE: `decoder_attentions` and `cross_attentions` should be:
-        //     //    list (one element for each generated token)
-        //     //    of list (one element for each layer of the decoder)
-        //     //    of torch.FloatTensor of shape (batch_size, num_heads, generated_length, sequence_length)
-        //     // However, since we are only generating one batch at a time, they are of the form:
-        //     //   list (batches)
-        //     //   of list (one element for each generated token)
-        //     //   of list (one element for each layer of the decoder)
-        //     //   of torch.FloatTensor of shape (1, num_heads, generated_length, sequence_length)
-        //     // 
-        //     // TODO: In future (when true parallelism, we should be able to return the correct shape)
-
-        //     const decoder_attentions = getFlattened('decoder_attentions');
-        //     const cross_attentions = getFlattened('cross_attentions');
-
-        //     return {
-        //         sequences,
-
-        //         decoder_attentions,
-        //         cross_attentions,
-        //     }
-        // } else {
-        //     return sequences;
-        // }
-    }
-
-    /**
-     * Helper function to add attentions to beam
-     * @param {Object} beam 
-     * @param {Object} output
-     * @private 
-     */
-    addAttentionsToBeam(beam, output) {
-        if (this.config.is_encoder_decoder) {
-            if (!output.cross_attentions || output.cross_attentions.length === 0) {
-                throw Error(
-                    "`output_attentions` is true, but the model did not produce cross-attentions. " +
-                    "This is most likely because the model was not exported with `output_attentions=True`."
-                )
-            }
-            if (!beam.cross_attentions) {
-                beam.cross_attentions = [];
-            }
-            beam.cross_attentions.push(output.cross_attentions);
-        }
-
-        if (!output.decoder_attentions || output.decoder_attentions.length === 0) {
-            throw Error(
-                "`output_attentions` is true, but the model did not produce decoder-attentions. " +
-                "This is most likely because the model was not exported with `output_attentions=True`."
-            )
-        }
-        if (!beam.decoder_attentions) {
-            beam.decoder_attentions = [];
-        }
-        beam.decoder_attentions.push(output.decoder_attentions);
-    }
-
-    /**
-     * Groups an array of beam objects by their ids.
-     *
-     * @param {Array} beams The array of beam objects to group.
-     * @returns {Array} An array of arrays, where each inner array contains beam objects with the same id.
-     */
-    groupBeams(beams) {
-        // Group beams by their ids
-        const groups = Object.create(null);
-        for (const obj of beams) {
-            if (groups[obj.id] === undefined) {
-                groups[obj.id] = [obj];
-            } else {
-                groups[obj.id].push(obj);
-            }
-        }
-
-        return Object.values(groups);
     }
 
     /**
@@ -1675,7 +1557,7 @@ export class PreTrainedModel extends Callable {
 
         for (const name in decoderResults) {
             if (name.startsWith('present')) {
-                let newName = name.replace('present', 'past_key_values');
+                const newName = name.replace('present', 'past_key_values');
 
                 if (pastKeyValues && name.includes('encoder')) {
                     // Optimization introduced by optimum to reuse past key values. So, we just replace the constant
@@ -1698,25 +1580,25 @@ export class PreTrainedModel extends Callable {
     }
 
     /**
-     * Returns an object containing attentions from the given decoder results object.
+     * Returns an object containing attentions from the given model output object.
      *
-     * @param {Object} decoderResults The decoder results object.
-     * @returns {Object} An object containing attentions.
+     * @param {Object} model_output The output of the model.
+     * @returns {{cross_attentions?: Tensor[]}} An object containing attentions.
      */
-    getAttentions(decoderResults) {
-        const attns = Object.create(null);
+    getAttentions(model_output) {
+        const attentions = {};
 
-        for (const attnName of ['cross_attentions', 'decoder_attentions']) {
-            const result = [];
-            for (const name in decoderResults) {
+        for (const attnName of ['cross_attentions', 'encoder_attentions', 'decoder_attentions']) {
+            for (const name in model_output) {
                 if (name.startsWith(attnName)) {
-                    const index = name.split('.').pop()
-                    result[index] = decoderResults[name];
+                    if (!(attnName in attentions)) {
+                        attentions[attnName] = [];
+                    }
+                    attentions[attnName].push(model_output[name]);
                 }
             }
-            attns[attnName] = result;
         }
-        return attns;
+        return attentions;
     }
 
     /**
@@ -1740,6 +1622,24 @@ export class PreTrainedModel extends Callable {
                 decoderFeeds[name] = new Tensor(dtype, empty, shapes[name]);
             }
         }
+    }
+
+    async encode_image({ pixel_values }) {
+        // image_inputs === { pixel_values }
+        const features = (await sessionRun(this.sessions['vision_encoder'], { pixel_values })).image_features;
+        if (!this.config.num_image_tokens) {
+            console.warn(
+                'The number of image tokens was not set in the model configuration. ' +
+                `Setting it to the number of features detected by the vision encoder (${features.dims[1]}).`
+            )
+            this.config.num_image_tokens = features.dims[1];
+        }
+        return features;
+    }
+
+    async encode_text({ input_ids }) {
+        // text_inputs === { input_ids, attention_mask }
+        return (await sessionRun(this.sessions['embed_tokens'], { input_ids })).inputs_embeds;
     }
 }
 
@@ -3176,6 +3076,29 @@ export class WhisperForConditionalGeneration extends WhisperPreTrainedModel {
             );
         }
 
+        if (generation_config.begin_suppress_tokens) {
+            logits_processor ??= new LogitsProcessorList();
+            logits_processor.push(
+                new SuppressTokensAtBeginLogitsProcessor(generation_config.begin_suppress_tokens, init_tokens.length)
+            );
+        }
+
+        if (generation_config.return_token_timestamps) {
+            if (!generation_config.alignment_heads) {
+                throw new Error(
+                    "Model generation config has no `alignment_heads`, token-level timestamps not available. " +
+                    "See https://gist.github.com/hollance/42e32852f24243b748ae6bc1f985b13a on how to add this property to the generation config."
+                )
+            }
+
+            if (generation_config.task === 'translate') {
+                console.warn("Token-level timestamps may not be reliable for task 'translate'.")
+            }
+
+            generation_config.output_attentions = true;
+            generation_config.return_dict_in_generate = true;
+        }
+
         const outputs = await super.generate({
             inputs,
             generation_config,
@@ -3184,16 +3107,24 @@ export class WhisperForConditionalGeneration extends WhisperPreTrainedModel {
             ...kwargs
         });
 
+        if (generation_config.return_token_timestamps) {
+            outputs["token_timestamps"] = this._extract_token_timestamps(
+                outputs,
+                generation_config.alignment_heads,
+                generation_config.num_frames,
+            );
+        }
+
         return outputs;
     }
 
     /**
      * Calculates token-level timestamps using the encoder-decoder cross-attentions and
      * dynamic time-warping (DTW) to map each output token to a position in the input audio.
+     * If `num_frames` is specified, the encoder-decoder cross-attentions will be cropped before applying DTW.
      * @param {Object} generate_outputs Outputs generated by the model
-     * @param {Tensor[][][]} generate_outputs.cross_attentions The cross attentions output by the model
-     * @param {Tensor[][][]} generate_outputs.decoder_attentions The decoder attentions output by the model
-     * @param {number[][]} generate_outputs.sequences The sequences output by the model
+     * @param {Tensor[][]} generate_outputs.cross_attentions The cross attentions output by the model
+     * @param {Tensor} generate_outputs.sequences The sequences output by the model
      * @param {number[][]} alignment_heads Alignment heads of the model
      * @param {number} [num_frames=null] Number of frames in the input audio.
      * @param {number} [time_precision=0.02] Precision of the timestamps in seconds
@@ -3206,6 +3137,12 @@ export class WhisperForConditionalGeneration extends WhisperPreTrainedModel {
                 "This is most likely because the model was not exported with `output_attentions=True`."
             )
         }
+        if (num_frames == null) {
+            console.warn(
+                "`num_frames` has not been set, meaning the entire audio will be analyzed. " +
+                "This may lead to inaccurate token-level timestamps for short audios (< 30 seconds)."
+            );
+        }
 
         let median_filter_width = this.config.median_filter_width;
         if (median_filter_width === undefined) {
@@ -3213,53 +3150,55 @@ export class WhisperForConditionalGeneration extends WhisperPreTrainedModel {
             median_filter_width = 7;
         }
 
-        const batchedMatrices = generate_outputs.cross_attentions.map(batch => {
-            // Create a list with `decoder_layers` elements, each a tensor of shape
-            // (batch size, attention_heads, output length, input length).
-            let cross_attentions = Array.from({ length: this.config.decoder_layers },
-                (_, i) => cat(batch.map(x => x[i]), 2)
-            );
+        // TODO: Improve batch processing
+        const batch = generate_outputs.cross_attentions;
+        // Create a list with `decoder_layers` elements, each a tensor of shape
+        // (batch size, attention_heads, output length, input length).
+        const cross_attentions = Array.from({ length: this.config.decoder_layers },
+            // Concatenate the cross attentions for each layer across sequence length dimension.
+            (_, i) => cat(batch.map(x => x[i]), 2)
+        );
 
-            let weights = stack(alignment_heads.map(([l, h]) => {
-                return num_frames
-                    ? cross_attentions[l].slice(null, h, null, [0, num_frames])
-                    : cross_attentions[l].slice(null, h);
-            }));
-            weights = weights.transpose(1, 0, 2, 3)
+        const weights = stack(alignment_heads.map(([l, h]) => {
+            if (l >= cross_attentions.length) {
+                throw new Error(`Layer index ${l} is out of bounds for cross attentions (length ${cross_attentions.length}).`)
+            }
+            return num_frames
+                ? cross_attentions[l].slice(null, h, null, [0, num_frames])
+                : cross_attentions[l].slice(null, h);
+        })).transpose(1, 0, 2, 3);
 
-            let [std, calculatedMean] = std_mean(weights, -2, 0, true);
+        const [std, calculatedMean] = std_mean(weights, -2, 0, true);
 
-            // Normalize and smoothen the weights.
-            let smoothedWeights = weights.clone(); // [1, 8, seqLength, 1500]
+        // Normalize and smoothen the weights.
+        const smoothedWeights = weights.clone(); // [1, 8, seqLength, 1500]
 
-            for (let a = 0; a < smoothedWeights.dims[0]; ++a) {
-                let aTensor = smoothedWeights[a]; // [8, seqLength, 1500]
+        for (let a = 0; a < smoothedWeights.dims[0]; ++a) {
+            const aTensor = smoothedWeights[a]; // [8, seqLength, 1500]
 
-                for (let b = 0; b < aTensor.dims[0]; ++b) {
-                    let bTensor = aTensor[b]; // [seqLength, 1500]
+            for (let b = 0; b < aTensor.dims[0]; ++b) {
+                const bTensor = aTensor[b]; // [seqLength, 1500]
 
-                    const stdTensor = std[a][b][0]; // [1500]
-                    const meanTensor = calculatedMean[a][b][0]; // [1500]
+                const stdTensorData = std[a][b][0].data; // [1500]
+                const meanTensorData = calculatedMean[a][b][0].data; // [1500]
 
-                    for (let c = 0; c < bTensor.dims[0]; ++c) {
+                for (let c = 0; c < bTensor.dims[0]; ++c) {
 
-                        let cTensor = bTensor[c]; // [1500]
-                        for (let d = 0; d < cTensor.data.length; ++d) {
-                            cTensor.data[d] = (cTensor.data[d] - meanTensor.data[d]) / stdTensor.data[d]
-                        }
-
-                        // Apply median filter.
-                        cTensor.data.set(medianFilter(cTensor.data, median_filter_width))
+                    let cTensorData = bTensor[c].data; // [1500]
+                    for (let d = 0; d < cTensorData.length; ++d) {
+                        cTensorData[d] = (cTensorData[d] - meanTensorData[d]) / stdTensorData[d]
                     }
+
+                    // Apply median filter.
+                    cTensorData.set(medianFilter(cTensorData, median_filter_width))
                 }
             }
+        }
 
-            // Average the different cross-attention heads.
-            const matrix = mean(smoothedWeights, 1);
-            return matrix;
-        });
+        // Average the different cross-attention heads.
+        const batchedMatrices = [mean(smoothedWeights, 1)];
 
-        const timestampsShape = [generate_outputs.sequences.length, generate_outputs.sequences[0].length];
+        const timestampsShape = generate_outputs.sequences.dims;
 
         const timestamps = new Tensor(
             'float32',
@@ -3272,16 +3211,16 @@ export class WhisperForConditionalGeneration extends WhisperPreTrainedModel {
             // NOTE: Since we run only one batch at a time, we can squeeze to get the same dimensions
             // as the python implementation
             const matrix = batchedMatrices[batch_idx].neg().squeeze_(0);
-            let [text_indices, time_indices] = dynamicTimeWarping(matrix);
+            const [text_indices, time_indices] = dynamic_time_warping(matrix.tolist());
 
-            let diffs = Array.from({ length: text_indices.length - 1 }, (v, i) => text_indices[i + 1] - text_indices[i]);
-            let jumps = mergeArrays([1], diffs).map(x => !!x); // convert to boolean
+            const diffs = Array.from({ length: text_indices.length - 1 }, (v, i) => text_indices[i + 1] - text_indices[i]);
+            const jumps = mergeArrays([1], diffs).map(x => !!x); // convert to boolean
 
-            let jump_times = [];
+            const jump_times = [];
             for (let i = 0; i < jumps.length; ++i) {
                 if (jumps[i]) {
-                    jump_times.push(time_indices[i] * time_precision);
                     // NOTE: No point in rounding here, since we set to Float32Array later
+                    jump_times.push(time_indices[i] * time_precision);
                 }
             }
             timestamps[batch_idx].data.set(jump_times, 1)
@@ -3339,24 +3278,6 @@ export class LlavaPreTrainedModel extends PreTrainedModel {
  * The LLAVA model which consists of a vision backbone and a language model.
  */
 export class LlavaForConditionalGeneration extends LlavaPreTrainedModel {
-
-    async encode_image({ pixel_values }) {
-        // image_inputs === { pixel_values }
-        const features = (await sessionRun(this.sessions['vision_encoder'], { pixel_values })).image_features;
-        if (!this.config.num_image_tokens) {
-            console.warn(
-                'The number of image tokens was not set in the model configuration. ' +
-                `Setting it to the number of features detected by the vision encoder (${features.dims[1]}).`
-            )
-            this.config.num_image_tokens = features.dims[1];
-        }
-        return features;
-    }
-
-    async encode_text({ input_ids }) {
-        // text_inputs === { input_ids, attention_mask }
-        return (await sessionRun(this.sessions['embed_tokens'], { input_ids })).inputs_embeds;
-    }
 
     _merge_input_ids_with_image_features({
         inputs_embeds,
@@ -3421,6 +3342,118 @@ export class LlavaForConditionalGeneration extends LlavaPreTrainedModel {
 
 export class Moondream1ForConditionalGeneration extends LlavaForConditionalGeneration { } // NOTE: extends LlavaForConditionalGeneration
 
+export class Florence2PreTrainedModel extends PreTrainedModel {
+    forward_params = [
+        // Encoder inputs
+        'input_ids',
+        'inputs_embeds',
+        'attention_mask',
+        'pixel_values',
+
+        // Decoder inputs
+        'encoder_outputs',
+        'decoder_input_ids',
+        'decoder_inputs_embeds',
+        'decoder_attention_mask',
+        'past_key_values',
+    ];
+    main_input_name = 'inputs_embeds';
+
+    constructor(config, sessions, generation_config) {
+        super(config, sessions);
+        this.generation_config = generation_config;
+    }
+}
+
+export class Florence2ForConditionalGeneration extends Florence2PreTrainedModel {
+
+    _merge_input_ids_with_image_features({
+        inputs_embeds,
+        image_features,
+        input_ids,
+        attention_mask,
+    }) {
+        return {
+            inputs_embeds: cat([
+                image_features, // image embeds
+                inputs_embeds, // task prefix embeds
+            ], 1),
+            attention_mask: cat([
+                ones(image_features.dims.slice(0, 2)), // image attention mask
+                attention_mask, // task prefix attention mask
+            ], 1),
+        }
+    }
+
+    async _prepare_inputs_embeds({ input_ids, pixel_values, inputs_embeds, attention_mask }) {
+        if (!input_ids && !pixel_values) {
+            throw new Error('Either `input_ids` or `pixel_values` should be provided.');
+        }
+
+        // 1. Possibly, extract the input embeddings
+        let text_features, image_features;
+        if (input_ids) {
+            text_features = await this.encode_text({ input_ids });
+        }
+        if (pixel_values) {
+            image_features = await this.encode_image({ pixel_values });
+        }
+
+        // 2. Possibly, merge text and images
+        if (text_features && image_features) {
+            ({ inputs_embeds, attention_mask } = this._merge_input_ids_with_image_features({
+                inputs_embeds: text_features,
+                image_features,
+                input_ids,
+                attention_mask,
+            }));
+        } else {
+            inputs_embeds = text_features || image_features;
+        }
+
+        return { inputs_embeds, attention_mask };
+    }
+
+    async forward({
+        input_ids,
+        pixel_values,
+        attention_mask,
+        decoder_input_ids,
+        decoder_attention_mask,
+        encoder_outputs,
+        past_key_values,
+
+        inputs_embeds,
+        decoder_inputs_embeds,
+    }) {
+        if (!inputs_embeds) {
+            ({ inputs_embeds, attention_mask } = await this._prepare_inputs_embeds({ input_ids, pixel_values, inputs_embeds, attention_mask }));
+        }
+
+        if (!encoder_outputs) {
+            // Must compute encoder outputs
+            let { last_hidden_state } = await encoderForward(this, { inputs_embeds, attention_mask });
+            encoder_outputs = last_hidden_state;
+        }
+
+        if (!decoder_inputs_embeds) {
+            if (!decoder_input_ids) {
+                throw new Error('Either `decoder_input_ids` or `decoder_inputs_embeds` should be provided.');
+            }
+            decoder_inputs_embeds = await this.encode_text({ input_ids: decoder_input_ids });
+        }
+
+        const decoderFeeds = {
+            inputs_embeds: decoder_inputs_embeds,
+            attention_mask: decoder_attention_mask,
+            encoder_attention_mask: attention_mask,
+            encoder_hidden_states: encoder_outputs,
+            past_key_values,
+        };
+        const decoder_outputs = await decoderForward(this, decoderFeeds, true);
+        return decoder_outputs;
+    }
+}
 export class CLIPPreTrainedModel extends PreTrainedModel { }
 
 /**
@@ -4301,6 +4334,33 @@ export class DetrSegmentationOutput extends ModelOutput {
         this.logits = logits;
         this.pred_boxes = pred_boxes;
         this.pred_masks = pred_masks;
+    }
+}
+//////////////////////////////////////////////////
+
+//////////////////////////////////////////////////
+export class RTDetrPreTrainedModel extends PreTrainedModel { }
+export class RTDetrModel extends RTDetrPreTrainedModel { }
+export class RTDetrForObjectDetection extends RTDetrPreTrainedModel {
+    /**
+     * @param {any} model_inputs
+     */
+    async _call(model_inputs) {
+        return new RTDetrObjectDetectionOutput(await super._call(model_inputs));
+    }
+}
+
+export class RTDetrObjectDetectionOutput extends ModelOutput {
+    /**
+     * @param {Object} output The output of the model.
+     * @param {Tensor} output.logits Classification logits (including no-object) for all queries.
+     * @param {Tensor} output.pred_boxes Normalized boxes coordinates for all queries, represented as (center_x, center_y, width, height).
+     * These values are normalized in [0, 1], relative to the size of each individual image in the batch (disregarding possible padding).
+     */
+    constructor({ logits, pred_boxes }) {
+        super();
+        this.logits = logits;
+        this.pred_boxes = pred_boxes;
     }
 }
 //////////////////////////////////////////////////
@@ -6117,6 +6177,7 @@ const MODEL_MAPPING_NAMES_ENCODER_ONLY = new Map([
     ['vits', ['VitsModel', VitsModel]],
 
     ['detr', ['DetrModel', DetrModel]],
+    ['rt_detr', ['RTDetrModel', RTDetrModel]],
     ['table-transformer', ['TableTransformerModel', TableTransformerModel]],
     ['vit', ['ViTModel', ViTModel]],
     ['fastvit', ['FastViTModel', FastViTModel]],
@@ -6315,6 +6376,7 @@ const MODEL_FOR_VISION_2_SEQ_MAPPING_NAMES = new Map([
 const MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES = new Map([
     ['llava', ['LlavaForConditionalGeneration', LlavaForConditionalGeneration]],
     ['moondream1', ['Moondream1ForConditionalGeneration', Moondream1ForConditionalGeneration]],
+    ['florence2', ['Florence2ForConditionalGeneration', Florence2ForConditionalGeneration]],
 ]);
 
 const MODEL_FOR_DOCUMENT_QUESTION_ANSWERING_MAPPING_NAMES = new Map([
@@ -6343,6 +6405,7 @@ const MODEL_FOR_IMAGE_CLASSIFICATION_MAPPING_NAMES = new Map([
 
 const MODEL_FOR_OBJECT_DETECTION_MAPPING_NAMES = new Map([
     ['detr', ['DetrForObjectDetection', DetrForObjectDetection]],
+    ['rt_detr', ['RTDetrForObjectDetection', RTDetrForObjectDetection]],
     ['table-transformer', ['TableTransformerForObjectDetection', TableTransformerForObjectDetection]],
     ['yolos', ['YolosForObjectDetection', YolosForObjectDetection]],
 ]);

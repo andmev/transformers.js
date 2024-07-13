@@ -14,6 +14,7 @@ from transformers import (
 )
 
 import onnx
+import onnxslim
 from optimum.exporters.onnx import main_export, export_models
 from optimum.onnx.graph_transformations import check_and_save_model
 from optimum.exporters.tasks import TasksManager
@@ -37,6 +38,7 @@ NO_PER_CHANNEL_REDUCE_RANGE_MODELS = {
     'mpt',
     'bloom',
     'llama',
+    'gemma',
     'opt',
     'mistral',
     'falcon',
@@ -223,6 +225,12 @@ class ConversionArguments:
             "that desire a finer-grained control on the export."
         }
     )
+    skip_onnxslim: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether or not to skip onnxslim."
+        }
+    )
 
 
 def get_operators(model: onnx.ModelProto) -> Set[str]:
@@ -366,6 +374,7 @@ def quantize(
             del quantizer
 
         elif mode == QuantMode.FP16:
+            # TODO: https://github.com/huggingface/optimum/blob/02c6ed5f413384d543bcf83a3a9094be2c0429a5/optimum/onnx/graph_transformations.py#L138
             try:
                 model_fp16 = float16.convert_float_to_float16(
                     loaded_model,
@@ -387,6 +396,8 @@ def quantize(
                           all_tensors_to_one_file=True,
                           size_threshold=10_000_000,
                           )
+                outputs.append(save_path + '_data')
+
         else:
             raise ValueError(f'Invalid quantization mode: {mode}')
 
@@ -471,7 +482,6 @@ def main():
         task=conv_args.task,
         do_validation=not conv_args.skip_validation,
         _variant=conv_args.variant,
-        library_name='transformers',
         **core_export_kwargs,
     )
 
@@ -619,6 +629,13 @@ def main():
                 f'Unable to export {config.model_type} model with `--split_modalities`.')
 
     os.makedirs(os.path.join(output_model_folder, 'onnx'), exist_ok=True)
+
+    if not conv_args.skip_onnxslim:
+        onnx_models = [os.path.join(output_model_folder, x)
+                    for x in os.listdir(output_model_folder) if x.endswith('.onnx')]
+
+        for model in onnx_models:
+            onnxslim.slim(model, model)
 
     # Step 2. (optional, recommended) quantize the converted model for fast inference and to reduce model size.
     if conv_args.quantize:

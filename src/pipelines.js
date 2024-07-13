@@ -985,7 +985,6 @@ export class TextGenerationPipeline extends (/** @type {new (options: TextPipeli
 
     /** @type {TextGenerationPipelineCallback} */
     async _call(texts, generate_kwargs = {}) {
-        throw new Error('This pipeline is not yet supported in Transformers.js v3.'); // TODO: Remove when implemented
         let isBatched = false;
         let isChatInput = false;
 
@@ -1032,20 +1031,17 @@ export class TextGenerationPipeline extends (/** @type {new (options: TextPipeli
         });
 
         const outputTokenIds = /** @type {Tensor} */(await this.model.generate({
-            // inputs: input_ids,
-            // attention_mask,
             ...text_inputs,
             ...generate_kwargs
         }));
 
-        let decoded = this.tokenizer.batch_decode(outputTokenIds, {
+        const decoded = this.tokenizer.batch_decode(outputTokenIds, {
             skip_special_tokens: true,
         });
 
-
         let promptLengths;
-        if (!return_full_text && input_ids.dims.at(-1) > 0) {
-            promptLengths = this.tokenizer.batch_decode(input_ids, {
+        if (!return_full_text && text_inputs.input_ids.dims.at(-1) > 0) {
+            promptLengths = this.tokenizer.batch_decode(text_inputs.input_ids, {
                 skip_special_tokens: true,
             }).map(x => x.length);
         }
@@ -1053,7 +1049,7 @@ export class TextGenerationPipeline extends (/** @type {new (options: TextPipeli
         /** @type {TextGenerationOutput[]} */
         const toReturn = Array.from({ length: texts.length }, _ => []);
         for (let i = 0; i < decoded.length; ++i) {
-            const textIndex = Math.floor(i / outputTokenIds.length * texts.length);
+            const textIndex = Math.floor(i / outputTokenIds.dims[0] * texts.length);
 
             if (promptLengths) {
                 // Trim the decoded text to only include the generated part
@@ -1785,8 +1781,11 @@ export class AutomaticSpeechRecognitionPipeline extends (/** @type {new (options
         const force_full_sequences = kwargs.force_full_sequences ?? false;
         let stride_length_s = kwargs.stride_length_s ?? null;
 
+        const generation_config = { ...kwargs }
+
         if (return_timestamps === 'word') {
-            kwargs['return_token_timestamps'] = true;
+            generation_config['return_token_timestamps'] = true;
+            generation_config['return_timestamps'] = false; // Do not predict timestamp tokens
         }
 
         const single = !Array.isArray(audio);
@@ -1819,22 +1818,23 @@ export class AutomaticSpeechRecognitionPipeline extends (/** @type {new (options
                 let offset = 0;
 
                 // Create subarrays of audio with overlaps
-
-                while (offset < aud.length) {
-                    const subarr = aud.subarray(offset, offset + window);
+                while (true) {
+                    const offset_end = offset + window;
+                    const subarr = aud.subarray(offset, offset_end);
                     const feature = await this.processor(subarr);
 
-                    const isFirst = offset === 0;
-                    const isLast = offset + jump >= aud.length;
+                    const is_first = offset === 0;
+                    const is_last = offset_end >= aud.length;
                     chunks.push({
                         stride: [
                             subarr.length,
-                            isFirst ? 0 : stride,
-                            isLast ? 0 : stride
+                            is_first ? 0 : stride,
+                            is_last ? 0 : stride
                         ],
                         input_features: feature.input_features,
-                        is_last: isLast
+                        is_last,
                     })
+                    if (is_last) break;
                     offset += jump;
                 }
 
@@ -1848,23 +1848,23 @@ export class AutomaticSpeechRecognitionPipeline extends (/** @type {new (options
 
             // Generate for each set of input features
             for (const chunk of chunks) {
-                kwargs.num_frames = Math.floor(chunk.stride[0] / hop_length);
+                generation_config.num_frames = Math.floor(chunk.stride[0] / hop_length);
 
                 // NOTE: doing sequentially for now
                 const data = await this.model.generate({
                     inputs: chunk.input_features,
-                    ...kwargs
+                    ...generation_config
                 });
 
                 // TODO: Right now we only get top beam
                 if (return_timestamps === 'word') {
-                    chunk.tokens = data.sequences[0].tolist();
+                    chunk.tokens = data.sequences.tolist()[0];
                     chunk.token_timestamps = data.token_timestamps.tolist()[0].map(
                         (/** @type {number} */ x) => round(x, 2)
                     );
 
                 } else {
-                    chunk.tokens = data[0].tolist();
+                    chunk.tokens = (/** @type {Tensor} */(data))[0].tolist();
                 }
 
                 // convert stride to seconds
@@ -2679,7 +2679,6 @@ export class TextToAudioPipeline extends (/** @type {new (options: TextToAudioPi
     async _call(text_inputs, {
         speaker_embeddings = null,
     } = {}) {
-        throw new Error('This pipeline is not yet supported in Transformers.js v3.'); // TODO: Remove when implemented
 
         // If this.processor is not set, we are using a `AutoModelForTextToWaveform` model
         if (this.processor) {
@@ -3310,6 +3309,8 @@ async function loadItems(mapping, model, pretrainedOptions) {
                         if (err.message?.includes('Unsupported model type')) {
                             // If the error is due to an unsupported model type, we
                             // save the error and try the next class.
+                            e = err;
+                        } else if (err.message?.includes('Could not locate file')) {
                             e = err;
                         } else {
                             reject(err);

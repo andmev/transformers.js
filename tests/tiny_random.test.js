@@ -12,6 +12,7 @@ import {
     BertTokenizer,
     T5Tokenizer,
     WhisperTokenizer,
+    BartTokenizer,
     PreTrainedTokenizer,
     AutoTokenizer,
 
@@ -19,6 +20,7 @@ import {
     CLIPImageProcessor,
     AutoProcessor,
     Processor,
+    Florence2Processor,
 
     // Models
     LlamaForCausalLM,
@@ -46,11 +48,13 @@ import {
     LlavaForConditionalGeneration,
     WhisperForConditionalGeneration,
     VisionEncoderDecoderModel,
+    Florence2ForConditionalGeneration,
 
     // Pipelines
     pipeline,
     FillMaskPipeline,
     TextClassificationPipeline,
+    TextGenerationPipeline,
     ImageClassificationPipeline,
     TokenClassificationPipeline,
     QuestionAnsweringPipeline,
@@ -598,6 +602,95 @@ describe('Tiny random models', () => {
         });
     });
 
+
+    describe('florence2', () => {
+
+        const texts = [
+            'Describe with a paragraph what is shown in the image.',
+            'Locate the objects with category name in the image.',
+        ]
+
+        // Empty white image
+        const dims = [224, 224, 3];
+        const image = new RawImage(new Uint8ClampedArray(dims[0] * dims[1] * dims[2]).fill(255), ...dims);
+
+        describe('Florence2ForConditionalGeneration', () => {
+            const model_id = 'Xenova/tiny-random-Florence2ForConditionalGeneration';
+
+            /** @type {Florence2ForConditionalGeneration} */
+            let model;
+            /** @type {BartTokenizer} */
+            let tokenizer;
+            /** @type {Florence2Processor} */
+            let processor;
+            beforeAll(async () => {
+                model = await Florence2ForConditionalGeneration.from_pretrained(model_id, {
+                    // TODO move to config
+                    ...DEFAULT_MODEL_OPTIONS,
+                });
+                tokenizer = await BartTokenizer.from_pretrained(model_id);
+                processor = await AutoProcessor.from_pretrained(model_id);
+            }, MAX_MODEL_LOAD_TIME);
+
+            it('forward', async () => {
+                const text_inputs = tokenizer(texts[0]);
+                const vision_inputs = await processor(image);
+                const inputs = {
+                    ...text_inputs,
+                    ...vision_inputs,
+                    decoder_input_ids: full([1, 1], 2n),
+                };
+
+                const { logits } = await model(inputs);
+                expect(logits.dims).toEqual([1, 1, 51289]);
+            });
+
+            it('batch_size=1', async () => {
+                const text_inputs = tokenizer(texts[0]);
+                {
+                    const generate_ids = await model.generate({ ...text_inputs, max_new_tokens: 10 });
+                    expect(generate_ids.tolist()).toEqual([
+                        [2n, 0n, 0n, 0n, 1n, 0n, 0n, 2n]
+                    ]);
+                }
+                {
+                    const vision_inputs = await processor(image);
+                    const inputs = { ...text_inputs, ...vision_inputs };
+
+                    const generate_ids = await model.generate({ ...inputs, max_new_tokens: 10 });
+                    expect(generate_ids.tolist()).toEqual([
+                        [2n, 0n, 48n, 48n, 48n, 48n, 48n, 48n, 48n, 48n, 2n]
+                    ]);
+                }
+            }, MAX_TEST_EXECUTION_TIME);
+
+            it('batch_size>1', async () => {
+                const text_inputs = tokenizer(texts, { padding: true });
+                {
+                    const generate_ids = await model.generate({ ...text_inputs, max_new_tokens: 10 });
+                    expect(generate_ids.tolist()).toEqual([
+                        [2n, 0n, 0n, 0n, 1n, 0n, 0n, 2n],
+                        [2n, 0n, 0n, 0n, 1n, 0n, 0n, 2n]
+                    ]);
+                }
+                {
+                    const vision_inputs = await processor([image, image]);
+                    const inputs = { ...text_inputs, ...vision_inputs };
+
+                    const generate_ids = await model.generate({ ...inputs, max_new_tokens: 10 });
+                    expect(generate_ids.tolist()).toEqual([
+                        [2n, 0n, 48n, 48n, 48n, 48n, 48n, 48n, 48n, 48n, 2n],
+                        [2n, 0n, 48n, 48n, 48n, 48n, 48n, 48n, 48n, 48n, 2n]
+                    ]);
+                }
+
+            }, MAX_TEST_EXECUTION_TIME);
+
+            afterAll(async () => {
+                await model?.dispose();
+            }, MAX_MODEL_DISPOSE_TIME);
+        });
+    });
 
     describe('vision-encoder-decoder', () => {
 
@@ -1552,7 +1645,6 @@ describe('Tiny random pipelines', () => {
         describe('batch_size=1', () => {
             it('default (top_k=1)', async () => {
                 const output = await pipe('a', 'b c');
-                console.log('output', output)
                 const target = { score: 0.11395696550607681, /* start: 0, end: 1, */ answer: 'b' };
                 compare(output, target, 1e-5);
             });
@@ -1692,6 +1784,81 @@ describe('Tiny random pipelines', () => {
                 compare(output, target, 1e-5);
             });
         });
+
+        afterAll(async () => {
+            await pipe?.dispose();
+        }, MAX_MODEL_DISPOSE_TIME);
+    });
+
+    describe('text-generation', () => {
+        const model_id = 'hf-internal-testing/tiny-random-LlamaForCausalLM';
+
+        /** @type {TextGenerationPipeline} */
+        let pipe;
+        beforeAll(async () => {
+            pipe = await pipeline('text-generation', model_id, {
+                // TODO move to config
+                ...DEFAULT_MODEL_OPTIONS,
+            });
+        }, MAX_MODEL_LOAD_TIME);
+
+        describe('batch_size=1', () => {
+            const text_input = 'hello';
+            const generated_text_target = 'erdingsAndroid Load';
+            const text_target = [{ generated_text: text_input + generated_text_target }]
+            const new_text_target = [{ generated_text: generated_text_target }]
+
+            const chat_input = [
+                { role: 'system', content: 'a' },
+                { role: 'user', content: 'b' },
+            ]
+            const chat_target = [{
+                generated_text: [
+                    { role: 'system', 'content': 'a' },
+                    { role: 'user', 'content': 'b' },
+                    { role: 'assistant', 'content': ' Southern abund Load' },
+                ],
+            }]
+
+            it('text input (single)', async () => {
+                const output = await pipe(text_input, { max_new_tokens: 3 });
+                compare(output, text_target);
+            });
+            it('text input (list)', async () => {
+                const output = await pipe([text_input], { max_new_tokens: 3 });
+                compare(output, [text_target]);
+            });
+
+            it('text input (single) - return_full_text=false', async () => {
+                const output = await pipe(text_input, { max_new_tokens: 3, return_full_text: false });
+                compare(output, new_text_target);
+            });
+            it('text input (list) - return_full_text=false', async () => {
+                const output = await pipe([text_input], { max_new_tokens: 3, return_full_text: false });
+                compare(output, [new_text_target]);
+            });
+
+            it('chat input (single)', async () => {
+                const output = await pipe(chat_input, { max_new_tokens: 3 });
+                compare(output, chat_target);
+            });
+            it('chat input (list)', async () => {
+                const output = await pipe([chat_input], { max_new_tokens: 3 });
+                compare(output, [chat_target]);
+            });
+        });
+
+        // TODO: Fix batch_size>1
+        // describe('batch_size>1', () => {
+        //     it('default', async () => {
+        //         const output = await pipe(['hello', 'hello world']);
+        //         const target = [
+        //            [{generated_text: 'helloerdingsAndroid Load'}],
+        //            [{generated_text: 'hello world zerosMillнал'}],
+        //         ];
+        //         compare(output, target);
+        //     });
+        // });
 
         afterAll(async () => {
             await pipe?.dispose();

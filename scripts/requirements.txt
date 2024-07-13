@@ -4,3 +4,4 @@ optimum @ git+https://github.com/andmev/optimum.git
 onnx==1.15.0
 onnxconverter-common==1.14.0
 tqdm
+onnxslim==0.1.31

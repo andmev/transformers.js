@@ -269,6 +269,7 @@ function whitespace_split(text) {
 }
 
 const PUNCTUATION_REGEX = '\\p{P}\\u0021-\\u002F\\u003A-\\u0040\\u005B-\\u0060\\u007B-\\u007E';
+const PUNCTUATION_ONLY_REGEX = new RegExp(`^[${PUNCTUATION_REGEX}]+$`, 'gu');
 
 // A mapping of regex patterns to their equivalent (but longer) JS-compatible versions.
 const PROBLEMATIC_REGEX_MAP = new Map([
@@ -2558,7 +2559,11 @@ export class PreTrainedTokenizer extends Callable {
 
 
         this.added_tokens_regex = this.added_tokens.length > 0 ? new RegExp(
-            this.added_tokens.map(x => `${x.lstrip ? '\\s*' : ''}(${escapeRegExp(x.content)})${x.rstrip ? '\\s*' : ''}`).join('|')
+            this.added_tokens
+                // Sort by length (desc) to avoid early partial matches
+                .toSorted((a, b) => b.content.length - a.content.length)
+                .map(x => `${x.lstrip ? '\\s*' : ''}(${escapeRegExp(x.content)})${x.rstrip ? '\\s*' : ''}`)
+                .join('|')
         ) : null;
 
         // Set mask token if present (otherwise will be undefined, which is fine)
@@ -3695,6 +3700,14 @@ export class WhisperTokenizer extends PreTrainedTokenizer {
                         let end_time;
                         if (i + 1 < token_timestamps.length) {
                             end_time = round(token_timestamps[i + 1] + time_offset, 2);
+
+                            // Do not allow punctuation-only tokens to have a duration.
+                            // This prevents long pauses from messing up the timestamps.
+                            const decoded_text = this.decode([token]);
+                            if (PUNCTUATION_ONLY_REGEX.test(decoded_text)) {
+                                // Add `time_precision` to avoid overlapping timestamps
+                                end_time = round(Math.min(start_time + time_precision, end_time), 2);
+                            }
                         } else {
                             // should never happen
                             end_time = null;
@@ -3838,7 +3851,9 @@ export class WhisperTokenizer extends PreTrainedTokenizer {
 
             const rightLength = rightSequence.length;
             for (let j = 1; j < leftLength + rightLength; ++j) {
-                const eps = j / 10000.0;
+                // Slightly convoluted because we don't want out of bound indices
+                // This will be necessary for a small conflict resolution optimization
+                // later
                 const leftStart = Math.max(0, leftLength - j);
                 const leftStop = Math.min(leftLength, leftLength + rightLength - j);
                 const left = leftSequence.slice(leftStart, leftStop);
@@ -3848,7 +3863,21 @@ export class WhisperTokenizer extends PreTrainedTokenizer {
                 if (left.length !== right.length) {
                     throw new Error("There is a bug within whisper `decode_asr` function, please report it. Dropping to prevent bad inference.");
                 }
-                const matches = left.filter((elem, idx) => elem === right[idx]).length;
+
+                let matches;
+                if (use_token_timestamp_sequences) {
+                    // Get length of longest subsequence of tokens that match
+                    // and have timestamps that are in order
+                    matches = left.filter((elem, idx) => (
+                        elem === right[idx]
+                        && left_token_timestamp_sequence[leftStart + idx] <= token_timestamp_sequences[i][rightStart + idx]
+                    )).length;
+                } else {
+                    matches = left.filter((elem, idx) => elem === right[idx]).length;
+                }
+
+                // epsilon to favor long perfect matches
+                const eps = j / 10000.0;
                 const matching = matches / j + eps;
                 if (matches > 1 && matching > max) {
                     max = matching;
